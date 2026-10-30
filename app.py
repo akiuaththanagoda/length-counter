@@ -3,23 +3,32 @@ import numpy as np
 import streamlit as st
 
 # Page Configuration
-st.set_page_config(page_title="Ocean Lanka - Wired USB Camera Fabric QC", layout="wide")
+st.set_page_config(page_title="Ocean Lanka - Fabric QC Length Counter", layout="wide")
 
-st.title("🧵 Ocean Lanka - Wired USB Camera Continuous Fabric Length Counter")
-st.markdown("QC මැෂින් එක මත ඇති **Wired USB Camera** එක මඟින් සජීවීව රෙදි පටිය නිරීක්ෂණය කරමින්, ටෙන්ෂන් වලින් තොරව සැබෑ දිග (Continuous Length) මනින පද්ධතිය.")
+st.title("🧵 Ocean Lanka - Continuous Fabric Length Counter (Multi-Camera QC)")
+st.markdown("ටෙන්ෂන් වලින් තොරව සැබෑ දිග (Continuous Length) මැනීම සඳහා බිල්ට් කැමරාව හෝ වයර් සහිත USB කැමරාව භාවිත කරන්න.")
 
 # --- SIDEBAR SETTINGS ---
-st.sidebar.header("⚙️ Hardware & Calibration")
+st.sidebar.header("⚙️ Camera & Calibration Setup")
 
-# USB Camera Selection (0 for Built-in/Default, 1 or 2 for External Wired USB Camera)
-camera_index = st.sidebar.number_input(
-    "Wired USB Camera Index (උදා: 1 හෝ 2)", 
-    min_value=0, 
-    max_value=10, 
-    value=1, 
-    step=1,
-    help="බාහිර වයර් සහිත USB කැමරාව සඳහා අංකය වෙනස් කරන්න (බිල්ට් කැමරාව මඟහරවා ගැනීමට 1 හෝ 2 දාන්න)."
+# Camera Source Selection
+camera_source = st.sidebar.radio(
+    "Select Camera Source",
+    ["Built-in Device Camera", "Wired USB Camera"]
 )
+
+if camera_source == "Built-in Device Camera":
+    camera_index = 0
+    st.sidebar.info("ලැප්ටොප්/පරිගණකයේ බිල්ට්-ඉන් කැමරාව තෝරා ඇත (Index: 0).")
+else:
+    camera_index = st.sidebar.number_input(
+        "Wired USB Camera Index", 
+        min_value=0, 
+        max_value=10, 
+        value=1, 
+        step=1,
+        help="බාහිර USB කැමරාව සඳහා අංකය (උදා: 1 හෝ 2) දෙන්න."
+    )
 
 px_per_cm = st.sidebar.number_input(
     "Calibration Factor (Pixels per cm)",
@@ -76,33 +85,32 @@ m_display.metric("Total Length (Meters)", f"{st.session_state.total_distance_cm 
 cm_display.metric("Total Length (Centimeters)", f"{st.session_state.total_distance_cm:.2f} cm")
 status_display.info("Status: Ready (Click Start Live Inspection)")
 
-# --- MAIN INSPECTION LOOP VIA WIRED USB CAMERA ---
+# --- MAIN INSPECTION LOOP ---
 if st.session_state.is_measuring:
-    # Open Wired USB Camera using backend DirectShow/V4L2 if needed
     cap = cv2.VideoCapture(camera_index, cv2.CAP_ANY)
     
     if not cap.isOpened():
-        st.error(f"❌ Wired USB Camera (Index {camera_index}) වෙත සම්බන්ධ වීම අසාර්ථකයි! කරුණාකර USB කේබලය පරීක්ෂා කර Index අංකය (0 හෝ 1) මාරු කර බලන්න.")
+        st.error(f"❌ කැමරාව (Index: {camera_index}) වෙත සම්බන්ධ වීම අසාර්ථකයි! කරුණාකර කැමරා සම්බන්ධතාවය හෝ Index අංකය පරීක්ෂා කරන්න.")
         st.session_state.is_measuring = False
     else:
-        # Set camera resolution for stable processing (e.g., HD)
+        # Set resolution for stable processing
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
         
         ret, prev_frame = cap.read()
         if ret:
             prev_gray = cv2.cvtColor(prev_frame, cv2.COLOR_BGR2GRAY)
-            status_display.success("Status: 🟢 Wired Cam Active & Measuring...")
+            status_display.success("Status: 🟢 Live Measuring Active...")
             
             while st.session_state.is_measuring:
                 ret, frame = cap.read()
                 if not ret:
-                    st.warning("⚠️ USB Camera feed interrupted or disconnected.")
+                    st.warning("⚠️ කැමරා දර්ශන ලබා ගැනීම ඇණහිට ඇත (Camera feed interrupted).")
                     break
                 
                 curr_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                 
-                # Optical Flow Calculation (Dense Farneback) to track fabric motion
+                # Optical Flow Calculation (Dense Farneback)
                 flow = cv2.calcOpticalFlowFarneback(
                     prev_gray, curr_gray, None,
                     pyr_scale=0.5, levels=3, winsize=15,
@@ -121,7 +129,7 @@ if st.session_state.is_measuring:
                     delta_cm = avg_dy / px_per_cm
                     st.session_state.total_distance_cm += delta_cm
                 
-                # Prevent negative accumulated values below zero
+                # Prevent negative values below zero
                 if st.session_state.total_distance_cm < 0:
                     st.session_state.total_distance_cm = 0.0
                 

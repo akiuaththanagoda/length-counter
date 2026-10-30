@@ -1,156 +1,142 @@
 import cv2
 import numpy as np
 import streamlit as st
-import time
+import tempfile
+import os
 
-# Page Configuration
-st.set_page_config(page_title="Ocean Lanka - Optical Flow Fabric Length Counter", layout="wide")
+st.set_page_config(page_title="Relaxed Fabric Length QC System", layout="wide")
 
-st.title("🧵 Ocean Lanka - QC Live Continuous Fabric Length Counter (Optical Flow)")
-st.caption("USB Camera Inspection System for Tension-Free Real-time Fabric Measurement")
+st.title("🧵 Ocean Lanka - Advanced Computer Vision Relaxed Fabric Length Measurement")
+st.markdown("මෙමඟින් ටෙන්ෂන් එක නිසා එන්කෝඩර් එකෙන් වැඩිපුර පෙන්නන දිග මඟහරවා, රෙද්දේ සැබෑ (Relaxed) දිග කැමරාව මඟින් නිවැරදිව ගණනය කරයි.")
 
-# --- SIDEBAR CONFIGURATION ---
-st.sidebar.header("⚙️ System Calibration & Setup")
-camera_index = st.sidebar.number_input("USB Camera Index (e.g., 0, 1, 2)", min_value=0, max_value=5, value=0, step=1)
-
-px_per_cm = st.sidebar.number_input(
-    "Calibration Factor (Pixels / cm)",
-    min_value=0.1,
-    max_value=500.0,
-    value=25.0,
-    step=0.5,
-    help="1 cm සඳහා කැමරාවට පෙනෙන Pixel ගණන ඇතුළත් කරන්න."
+# Sidebar Settings
+st.sidebar.header("⚙️ Calibration & Settings")
+calibration_factor = st.sidebar.number_input(
+    "Pixels per Centimeter (px/cm)", 
+    min_value=1.0, 
+    max_value=100.0, 
+    value=10.0, 
+    step=0.1,
+    help="කැමරා රාමුව තුළ 1cm කට අදාළ පික්සල් ගණන මෙහි ඇතුළත් කරන්න."
 )
 
-direction_invert = st.sidebar.checkbox("Invert Motion Direction (+/-)", value=False)
-motion_threshold = st.sidebar.slider("Noise Reduction Threshold", min_value=0.1, max_value=5.0, value=0.5, step=0.1)
+color_threshold = st.sidebar.slider(
+    "Fabric Color Sensitivity (Threshold)", 
+    min_value=10, 
+    max_value=200, 
+    value=50
+)
 
-# --- SESSION STATE INITIALIZATION ---
-if "total_distance_cm" not in st.session_state:
-    st.session_state.total_distance_cm = 0.0
-if "is_measuring" not in st.session_state:
-    st.session_state.is_measuring = False
+app_mode = st.sidebar.selectbox("Choose Mode", ["Upload Video", "Live Camera Feed"])
 
-# --- UI CONTROLS ---
-col1, col2, col3, col4 = st.columns(4)
-
-with col1:
-    if st.button("▶️ Start Inspection", use_container_width=True):
-        st.session_state.is_measuring = True
-
-with col2:
-    if st.button("⏸️ Pause Inspection", use_container_width=True):
-        st.session_state.is_measuring = False
-
-with col3:
-    if st.button("🏁 End Current Roll & Save", use_container_width=True):
-        final_len = st.session_state.total_distance_cm
-        st.success(f"🎉 Roll Inspection Finished! Final Length: **{final_len/100:.2f} m** ({final_len:.2f} cm)")
-        st.session_state.total_distance_cm = 0.0
-        st.session_state.is_measuring = False
-
-with col4:
-    if st.button("🔄 Reset Counter to 0", use_container_width=True):
-        st.session_state.total_distance_cm = 0.0
-
-st.divider()
-
-# Dashboard Displays
-kpi_col1, kpi_col2, kpi_col3 = st.columns(3)
-metric_m = kpi_col1.empty()
-metric_cm = kpi_col2.empty()
-status_indicator = kpi_col3.empty()
-
-video_placeholder = st.empty()
-
-# Initialize initial values on dashboard
-metric_m.metric(label="Total Measured Distance (Meters)", value=f"{st.session_state.total_distance_cm / 100:.3f} m")
-metric_cm.metric(label="Total Distance (Centimeters)", value=f"{st.session_state.total_distance_cm:.2f} cm")
-status_indicator.info("Status: Ready to Inspect")
-
-# --- CAMERA PROCESS LOOP ---
-if st.session_state.is_measuring:
-    cap = cv2.VideoCapture(camera_index)
+def process_frame(frame, px_per_cm):
+    """
+    Frame එකක් පරික්ෂා කර රෙද්දේ කොන්ටූර් (Contour) සොයා පික්සල් මඟින් දිග මැන සෙන්ටිමීටර වලට හරවයි.
+    """
+    height, width, _ = frame.shape
     
-    if not cap.isOpened():
-        st.error(f"❌ Camera at index {camera_index} could not be accessed. Please check USB connection.")
-        st.session_state.is_measuring = False
-    else:
-        ret, prev_frame = cap.read()
-        if ret:
-            prev_gray = cv2.cvtColor(prev_frame, cv2.COLOR_BGR2GRAY)
-            status_indicator.success("Status: 🟢 Live Measuring...")
+    # Preprocessing: Convert to Grayscale & Blur to remove noise
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    
+    # Thresholding / Edge Detection to isolate fabric in the relax zone
+    _, thresh = cv2.threshold(blurred, 100, 255, cv2.THRESH_BINARY_INV)
+    
+    # Find contours of the fabric
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    max_length_cm = 0.0
+    output_frame = frame.copy()
+    
+    if contours:
+        # Find the largest contour representing the relaxed fabric segment
+        largest_contour = max(contours, key=cv2.contourArea)
+        
+        if cv2.contourArea(largest_contour) > 1000: # Filter small noise
+            # Get rotated bounding box to handle angled fabric flow
+            rect = cv2.minAreaRect(largest_contour)
+            box = cv2.boxPoints(rect)
+            box = np.int64(box)
             
-            while st.session_state.is_measuring:
-                ret, current_frame = cap.read()
+            # Draw contour and bounding box
+            cv2.drawContours(output_frame, [box], 0, (0, 255, 0), 2)
+            
+            # Calculate length (taking the maximum dimension of the bounding box)
+            width_px = rect[1][0]
+            height_px = rect[1][1]
+            fabric_length_px = max(width_px, height_px)
+            
+            # Convert pixels to centimeters / meters
+            max_length_cm = fabric_length_px / px_per_cm
+            
+            # Display measurement text on frame
+            center_x, center_y = int(rect[0][0]), int(rect[0][1])
+            cv2.putText(output_frame, f"Length: {max_length_cm:.2f} cm", 
+                        (center_x - 50, center_y), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+
+    return output_frame, max_length_cm
+
+# --- MODE 1: UPLOAD VIDEO ---
+if app_mode == "Upload Video":
+    uploaded_file = st.file_uploader("Upload Fabric QC Video (.mp4, .avi)", type=["mp4", "avi", "mov"])
+    
+    if uploaded_file is not None:
+        tfile = tempfile.NamedTemporaryFile(delete=False)
+        tfile.write(uploaded_file.read())
+        video_path = tfile.name
+        
+        cap = cv2.VideoCapture(video_path)
+        st.video(uploaded_file)
+        
+        if st.button("▶️ Process Video for Relaxed Length"):
+            stt = st.empty()
+            stt.text("ප්‍රොසෙස් වෙමින් පවතී...")
+            
+            frame_placeholder = st.empty()
+            metric_placeholder = st.empty()
+            
+            total_lengths = []
+            while cap.isOpened():
+                ret, frame = cap.read()
                 if not ret:
-                    st.warning("⚠️ Frame drop detected or camera disconnected.")
                     break
                 
-                current_gray = cv2.cvtColor(current_frame, cv2.COLOR_BGR2GRAY)
+                processed_frame, length_cm = process_frame(frame, calibration_factor)
+                if length_cm > 0:
+                    total_lengths.append(length_cm)
                 
-                # Dense Optical Flow Calculation (Farneback Method)
-                flow = cv2.calcOpticalFlowFarneback(
-                    prev_gray, 
-                    current_gray, 
-                    None, 
-                    pyr_scale=0.5, 
-                    levels=3, 
-                    winsize=15, 
-                    iterations=3, 
-                    poly_n=5, 
-                    poly_sigma=1.2, 
-                    flags=0
-                )
-                
-                # Extract Vertical (Y-axis) and Horizontal (X-axis) motion vectors
-                # assuming fabric moves vertically down/up on the screen
-                flow_y = flow[..., 1] 
-                avg_dy_px = np.mean(flow_y)
-                
-                # Invert vector if camera is mounted upside-down
-                if direction_invert:
-                    avg_dy_px = -avg_dy_px
-                
-                # Apply noise filter threshold
-                if abs(avg_dy_px) > motion_threshold:
-                    delta_cm = avg_dy_px / px_per_cm
-                    st.session_state.total_distance_cm += delta_cm
-                
-                # Prevent negative distance below zero on fresh roll
-                if st.session_state.total_distance_cm < 0:
-                    st.session_state.total_distance_cm = 0.0
-
-                # Render Video Overlays
-                output_frame = current_frame.copy()
-                h, w, _ = output_frame.shape
-                
-                # Draw Motion Vectors/Overlay Text
-                cv2.rectangle(output_frame, (10, 10), (450, 90), (0, 0, 0), -1)
-                
-                current_m = st.session_state.total_distance_cm / 100.0
-                cv2.putText(output_frame, f"LIVE LENGTH: {current_m:.3f} m", (20, 45),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
-                
-                motion_dir_text = "FORWARD (+)" if avg_dy_px > motion_threshold else ("BACKWARD (-)" if avg_dy_px < -motion_threshold else "STOPPED (0)")
-                color = (0, 255, 255) if "FORWARD" in motion_dir_text else ((0, 0, 255) if "BACKWARD" in motion_dir_text else (255, 255, 255))
-                
-                cv2.putText(output_frame, f"DIR: {motion_dir_text}", (20, 75),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-                
-                # Directional Arrow Indicator
-                if abs(avg_dy_px) > motion_threshold:
-                    arrow_start = (w - 50, h // 2)
-                    arrow_end = (w - 50, (h // 2) + int(np.sign(avg_dy_px) * 50))
-                    cv2.arrowedLine(output_frame, arrow_start, arrow_end, color, 3)
-
-                # Streamlit UI Updates
-                metric_m.metric(label="Total Measured Distance (Meters)", value=f"{current_m:.3f} m")
-                metric_cm.metric(label="Total Distance (Centimeters)", value=f"{st.session_state.total_distance_cm:.2f} cm")
-                
-                frame_rgb = cv2.cvtColor(output_frame, cv2.COLOR_BGR2RGB)
-                video_placeholder.image(frame_rgb, channels="RGB", use_column_width=True)
-                
-                prev_gray = current_gray
-                
+                # Show processed frame in Streamlit
+                processed_frame_rgb = cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB)
+                frame_placeholder.image(processed_frame_rgb, channels="RGB", use_column_width=True)
+            
             cap.release()
+            stt.text("විමර්ෂණය සාර්ථකයි!")
+            
+            if total_lengths:
+                avg_length = np.mean(total_lengths)
+                metric_placeholder.success(f"✅ සකස් කළ සැබෑ රෙදි දිග (Average Relaxed Length): **{avg_length:.2f} cm** ({avg_length/100:.2f} මීටර්)")
+
+# --- MODE 2: LIVE CAMERA FEED ---
+elif app_mode == "Live Camera Feed":
+    st.warning("ලයිව් කැමරාව ක්‍රියාත්මක කිරීමට ප්‍රාදේශීය පරිගණකයේ OpenCV සහ වෙබ් කැමරාව කන්ෆිගර් කර තිබිය යුතුය.")
+    run_cam = st.checkbox("Turn on Live Camera")
+    
+    camera_placeholder = st.empty()
+    length_display = st.empty()
+    
+    if run_cam:
+        cap = cv2.VideoCapture(0) # 0 for default webcam or IP camera stream URL
+        while run_cam:
+            ret, frame = cap.read()
+            if not ret:
+                st.error("කැමරාව වෙත සම්බන්ධ වීම අසාර්ථකයි.")
+                break
+            
+            processed_frame, length_cm = process_frame(frame, calibration_factor)
+            processed_frame_rgb = cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB)
+            
+            camera_placeholder.image(processed_frame_rgb, channels="RGB", use_column_width=True)
+            length_display.metric(label="Measured Relaxed Length", value=f"{length_cm:.2f} cm")
+            
+        cap.release()

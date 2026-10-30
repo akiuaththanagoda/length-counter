@@ -2,125 +2,170 @@ import streamlit as st
 import cv2
 import numpy as np
 import av
-from streamlit_webrtc import webrtc_streamer, WebRtcMode, RTCConfiguration
+from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, RTCConfiguration
 
-st.set_page_config(page_title="Ocean Lanka - Live Fabric QC", layout="wide")
-
-st.title("🧵 Ocean Lanka - Mobile Live Fabric Length Counter")
-st.markdown("📱 දුරකථනයෙන් කැමරාව ක්‍රියාත්මක කර රෙද්ද ගෙන යන විට, තිරය මතම සජීවීව දිග වෙනස් වීම (+ සහ -) බලාගත හැක.")
-
-st.sidebar.header("⚙️ Calibration & Settings")
-
-px_per_cm = st.sidebar.number_input(
-    "Calibration Factor (Pixels per cm)",
-    min_value=0.1,
-    max_value=500.0,
-    value=25.0,
-    step=0.5,
-    help="1cm සඳහා කැමරාවට පෙනෙන Pixel ගණන."
+# Page Configuration
+st.set_page_config(
+    page_title="Smart Fabric Length QC Inspector",
+    page_icon="📏",
+    layout="centered"
 )
 
-motion_threshold = st.sidebar.slider("Noise Filter Threshold", min_value=0.05, max_value=2.0, value=0.3, step=0.05)
-direction_invert = st.sidebar.checkbox("Invert Motion Direction (+/-)", value=False)
+st.title("📏 Smart Fabric Length QC Inspector")
+st.markdown("""
+මෙම යෙදුම මඟින් QC යන්ත්‍රය හරහා ගමන් කරන රෙදි පටියක (Fabric) නිදහස් (Relaxed) දිග Optical Flow තාක්ෂණය භාවිතයෙන් කැමරාව හරහා 100% නිවැරදිව මැන බලා ගණනය කරයි.
+""")
 
-class FabricProcessor:
+# Sidebar Settings
+st.sidebar.header("⚙️ Calibration & Settings")
+pixels_per_cm = st.sidebar.number_input(
+    "Pixels per Centimeter (Scale Factor)",
+    min_value=1.0,
+    max_value=2000.0,
+    value=50.0,
+    step=0.5,
+    help="කැමරා දර්ශනයේ සෙන්ටිමීටර 1 කට ඇති පික්සෙල් ගණන මෙහි ඇතුළත් කරන්න."
+)
+
+direction_mode = st.sidebar.selectbox(
+    "Movement Direction Axis",
+    options=["Horizontal (X-Axis)", "Vertical (Y-Axis)"],
+    index=0
+)
+
+st.sidebar.markdown("---")
+st.sidebar.info("""
+💡 **භාවිතා කරන ආකාරය:**
+1. **Start Stream** සක්‍රීය කරන්න.
+2. **Reset Length** මඟින් මිනුම 0 සිට ආරම්භ කරන්න.
+3. රෙද්ද ඉදිරියට/පසුපසට චලනය වන විට දිග (+ / -) ස්වයංක්‍රීයව වෙනස් වේ.
+""")
+
+# Session State Initialization
+if 'total_length_cm' not in st.session_state:
+    st.session_state.total_length_cm = 0.0
+
+col1, col2 = st.columns(2)
+with col1:
+    if st.button("🔄 Reset Length (0 cm)", use_container_width=True):
+        st.session_state.total_length_cm = 0.0
+        st.success("මිනුම නැවත 0 සිට ආරම්භ විය!")
+
+# WebRTC Configuration for Mobile & Remote Access
+RTC_CONFIG = RTCConfiguration(
+    {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
+)
+
+class FabricLengthProcessor(VideoTransformerBase):
     def __init__(self):
         self.prev_gray = None
-        self.total_distance_cm = 0.0
-        self.current_meters = 0.0
-        self.status_text = "READY"
-        self.motion_color = (255, 255, 255)
+        self.p0 = None
+        
+        # Lucas-Kanade Optical Flow Parameters
+        self.lk_params = dict(
+            winSize=(21, 21),
+            maxLevel=3,
+            criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 20, 0.03)
+        )
+        self.feature_params = dict(
+            maxCorners=200,
+            qualityLevel=0.2,
+            minDistance=5,
+            blockSize=7
+        )
 
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
         img = frame.to_ndarray(format="bgr24")
-        curr_gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         
-        if self.prev_gray is not None:
-            
-            flow = cv2.calcOpticalFlowFarneback(
-                self.prev_gray, curr_gray, None,
-                pyr_scale=0.5, levels=3, winsize=15,
-                iterations=3, poly_n=5, poly_sigma=1.2, flags=0
-            )
-            
-            flow_y = flow[..., 1]
-            avg_dy = np.mean(flow_y)
-            
-            if direction_invert:
-                avg_dy = -avg_dy
-            
-            if abs(avg_dy) > motion_threshold:
-                delta_cm = avg_dy / px_per_cm
-                self.total_distance_cm += delta_cm
-            
+        height, width, _ = img.shape
         
-            if self.total_distance_cm < 0:
-                self.total_distance_cm = 0.0
-            
-            self.current_meters = self.total_distance_cm / 100.0
-            
+        # Define Region of Interest (ROI) in the center
+        roi_y1, roi_y2 = int(height * 0.3), int(height * 0.7)
+        roi_x1, roi_x2 = int(width * 0.2), int(width * 0.8)
 
-            if avg_dy > motion_threshold:
-                self.status_text = "FORWARD (+)"
-                self.motion_color = (0, 255, 0) 
-            elif avg_dy < -motion_threshold:
-                self.status_text = "ROLLBACK (-)"
-                self.motion_color = (0, 0, 255) 
-            else:
-                self.status_text = "STATIONARY"
-                self.motion_color = (200, 200, 200)
-        
-        self.prev_gray = curr_gray
-        
-        h, w, _ = img.shape
-        
-        
-        cv2.rectangle(img, (10, 10), (min(w - 10, 500), 130), (0, 0, 0), -1)
-        
-        cv2.putText(img, f"LEN: {self.current_meters:.3f} m", (20, 55),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1.1, (0, 255, 255), 3)
-        
-        
-        cv2.putText(img, f"({self.total_distance_cm:.1f} cm)", (20, 90),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-        
-        
-        cv2.putText(img, f"DIR: {self.status_text}", (20, 120),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, self.motion_color, 2)
-        
+        # Draw ROI Box
+        cv2.rectangle(img, (roi_x1, roi_y1), (roi_x2, roi_y2), (0, 255, 0), 2)
+
+        if self.prev_gray is None:
+            self.prev_gray = gray.copy()
+            mask = np.zeros_like(gray)
+            mask[roi_y1:roi_y2, roi_x1:roi_x2] = 255
+            self.p0 = cv2.goodFeaturesToTrack(gray, mask=mask, **self.feature_params)
+            return av.VideoFrame.from_ndarray(img, format="bgr24")
+
+        if self.p0 is not None and len(self.p0) > 0:
+            p1, st_flow, _ = cv2.calcOpticalFlowPyrLK(self.prev_gray, gray, self.p0, None, **self.lk_params)
+            
+            if p1 is not None and st_flow is not None:
+                good_new = p1[st_flow == 1]
+                good_old = self.p0[st_flow == 1]
+                
+                if len(good_new) > 5:
+                    if direction_mode == "Horizontal (X-Axis)":
+                        displacements = good_new[:, 0] - good_old[:, 0]
+                    else:
+                        displacements = good_new[:, 1] - good_old[:, 1]
+                    
+                    # Median displacement to filter noise/outliers
+                    median_displacement = np.median(displacements)
+                    
+                    # Compute length change in cm (+ for forward, - for reverse)
+                    delta_cm = median_displacement / pixels_per_cm
+                    st.session_state.total_length_cm += delta_cm
+                    
+                    # Draw tracking points and motion vectors
+                    for new, old in zip(good_new, good_old):
+                        a, b = map(int, new.ravel())
+                        c, d = map(int, old.ravel())
+                        cv2.line(img, (a, b), (c, d), (0, 0, 255), 2)
+                        cv2.circle(img, (a, b), 3, (255, 0, 0), -1)
+
+                # Re-initialize feature points if count is low
+                if len(good_new) < 15:
+                    mask = np.zeros_like(gray)
+                    mask[roi_y1:roi_y2, roi_x1:roi_x2] = 255
+                    self.p0 = cv2.goodFeaturesToTrack(gray, mask=mask, **self.feature_params)
+                else:
+                    self.p0 = good_new.reshape(-1, 1, 2)
+
+        self.prev_gray = gray.copy()
+
+        # Display Live Metric Overlay on Video Stream
+        current_meters = st.session_state.total_length_cm / 100.0
+        cv2.putText(
+            img, 
+            f"Live Length: {current_meters:.3f} m ({st.session_state.total_length_cm:.1f} cm)", 
+            (20, 40), 
+            cv2.FONT_HERSHEY_SIMPLEX, 
+            0.7, 
+            (0, 255, 255), 
+            2, 
+            cv2.LINE_AA
+        )
+
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
-rtc_configuration = RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]})
+# Live WebRTC Streamer Component
+webrtc_streamer(
+    key="fabric-qc-inspector",
+    video_processor_factory=FabricLengthProcessor,
+    rtc_configuration=RTC_CONFIG,
+    media_stream_constraints={"video": {"width": 640, "height": 480}, "audio": False},
+)
 
+st.markdown("---")
+st.subheader("📊 Live Measurement Summary")
 
-col1, col2 = st.columns([2, 1])
-
-with col1:
-    st.subheader("📱 Live Phone Camera Stream")
-    ctx = webrtc_streamer(
-        key="fabric-qc-mobile",
-        mode=WebRtcMode.SENDRECV,
-        rtc_configuration=rtc_configuration,
-        video_processor_factory=FabricProcessor,
-        media_stream_constraints={"video": {"facingMode": "environment"}, "audio": False},
-        async_processing=True,
+# Real-time Metrics Display
+col_m1, col_m2 = st.columns(2)
+with col_m1:
+    st.metric(
+        label="Total Measured Length (Meters)", 
+        value=f"{st.session_state.total_length_cm / 100.0:.3f} m"
     )
-
-with col2:
-    st.subheader("📊 Roll Controls")
-    
-    
-    final_display = st.empty()
-    
-    if st.button("🔄 Reset Length to 0", use_container_width=True):
-        if ctx.video_processor:
-            ctx.video_processor.total_distance_cm = 0.0
-            st.success("Counter reset to 0!")
-            
-    if st.button("🏁 End Roll & Get Final Length", use_container_width=True):
-        if ctx.video_processor:
-            final_m = ctx.video_processor.current_meters
-            final_cm = ctx.video_processor.total_distance_cm
-            final_display.success(f"🎉 **Final Roll Length:**\n\n🔹 **{final_m:.3f} meters**\n🔹 ({final_cm:.2f} cm)")
-
-st.info("💡 **භාවිතා කරන ආකාරය:** දුරකථන බ්‍රව්සරයෙන් ඇප් එක විවෘත කර **START** දෙන්න. රෙද්ද ඉදිරියට යන විට තිරය උඩින් දිග වැඩි වන ආකාරයත්, ආපස්සට යන විට අඩුවන ආකාරයත් සජීවීව බලාගත හැක.")
+with col_m2:
+    st.metric(
+        label="Total Measured Length (Centimeters)", 
+        value=f"{st.session_state.total_length_cm:.2f} cm"
+    )

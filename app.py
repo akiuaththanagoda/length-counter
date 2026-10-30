@@ -1,132 +1,156 @@
-import streamlit as st
 import cv2
 import numpy as np
-import av
-from streamlit_webrtc import webrtc_streamer, WebRtcMode, RTCConfiguration
+import streamlit as st
+import time
 
 # Page Configuration
-st.set_page_config(page_title="Ocean Lanka - Fabric QC Live Length", layout="wide")
+st.set_page_config(page_title="Ocean Lanka - Optical Flow Fabric Length Counter", layout="wide")
 
-st.title("🧵 Ocean Lanka - Real-time Fabric Length Measurement QC System")
-st.markdown("കැමරා දර්ශනය සහ සජීවීව ගණනය වන දිග අගය (Live Length) එකම තිරයක පහසුවෙන් නිරීක්ෂණය කරන්න.")
+st.title("🧵 Ocean Lanka - QC Live Continuous Fabric Length Counter (Optical Flow)")
+st.caption("USB Camera Inspection System for Tension-Free Real-time Fabric Measurement")
 
-# --- SIDEBAR SETTINGS ---
-st.sidebar.header("⚙️ Calibration & Settings")
+# --- SIDEBAR CONFIGURATION ---
+st.sidebar.header("⚙️ System Calibration & Setup")
+camera_index = st.sidebar.number_input("USB Camera Index (e.g., 0, 1, 2)", min_value=0, max_value=5, value=0, step=1)
 
 px_per_cm = st.sidebar.number_input(
-    "Calibration Factor (Pixels per cm)",
+    "Calibration Factor (Pixels / cm)",
     min_value=0.1,
     max_value=500.0,
     value=25.0,
     step=0.5,
-    help="1cm සඳහා කැමරාවට පෙනෙන Pixel ගණන."
+    help="1 cm සඳහා කැමරාවට පෙනෙන Pixel ගණන ඇතුළත් කරන්න."
 )
 
-motion_threshold = st.sidebar.slider("Noise Filter Threshold", min_value=0.05, max_value=2.0, value=0.3, step=0.05)
 direction_invert = st.sidebar.checkbox("Invert Motion Direction (+/-)", value=False)
+motion_threshold = st.sidebar.slider("Noise Reduction Threshold", min_value=0.1, max_value=5.0, value=0.5, step=0.1)
 
-# --- WEBRTC VIDEO PROCESSOR CLASS ---
-class FabricProcessor:
-    def __init__(self):
-        self.prev_gray = None
-        self.total_distance_cm = 0.0
-        self.current_meters = 0.0
-        self.status_text = "READY"
+# --- SESSION STATE INITIALIZATION ---
+if "total_distance_cm" not in st.session_state:
+    st.session_state.total_distance_cm = 0.0
+if "is_measuring" not in st.session_state:
+    st.session_state.is_measuring = False
 
-    def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
-        img = frame.to_ndarray(format="bgr24")
-        curr_gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        
-        if self.prev_gray is not None:
-            # Optical Flow Calculation (Dense Farneback)
-            flow = cv2.calcOpticalFlowFarneback(
-                self.prev_gray, curr_gray, None,
-                pyr_scale=0.5, levels=3, winsize=15,
-                iterations=3, poly_n=5, poly_sigma=1.2, flags=0
-            )
-            
-            flow_y = flow[..., 1]
-            avg_dy = np.mean(flow_y)
-            
-            if direction_invert:
-                avg_dy = -avg_dy
-            
-            # Accumulate distance if movement exceeds noise threshold
-            if abs(avg_dy) > motion_threshold:
-                delta_cm = avg_dy / px_per_cm
-                self.total_distance_cm += delta_cm
-            
-            # Prevent negative values below zero
-            if self.total_distance_cm < 0:
-                self.total_distance_cm = 0.0
-            
-            self.current_meters = self.total_distance_cm / 100.0
-            
-            # Motion State Text
-            if avg_dy > motion_threshold:
-                self.status_text = "MOVING FORWARD (+)"
-            elif avg_dy < -motion_threshold:
-                self.status_text = "ROLLING BACK (-)"
-            else:
-                self.status_text = "STATIONARY (0)"
-        
-        self.prev_gray = curr_gray
-        
-        # --- RENDER HUD OVERLAY ON VIDEO ---
-        cv2.rectangle(img, (15, 15), (480, 110), (20, 20, 20), -1)
-        cv2.putText(img, f"LIVE LEN: {self.current_meters:.3f} m", (25, 50),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-        cv2.putText(img, f"LEN (CM): {self.total_distance_cm:.2f} cm", (25, 80),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
-        cv2.putText(img, f"STATUS: {self.status_text}", (25, 105),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
-        
-        return av.VideoFrame.from_ndarray(img, format="bgr24")
+# --- UI CONTROLS ---
+col1, col2, col3, col4 = st.columns(4)
 
-rtc_configuration = RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]})
+with col1:
+    if st.button("▶️ Start Inspection", use_container_width=True):
+        st.session_state.is_measuring = True
 
-# --- MAIN DASHBOARD LAYOUT ---
-col_main_view, col_sidebar_metrics = st.columns([2, 1])
+with col2:
+    if st.button("⏸️ Pause Inspection", use_container_width=True):
+        st.session_state.is_measuring = False
 
-with col_main_view:
-    st.subheader("📹 Live Camera Feed & Inspection Interface")
-    ctx = webrtc_streamer(
-        key="fabric-qc-device-camera",
-        mode=WebRtcMode.SENDRECV,
-        rtc_configuration=rtc_configuration,
-        video_processor_factory=FabricProcessor,
-        media_stream_constraints={"video": {"facingMode": "environment"}, "audio": False},
-        async_processing=True,
-    )
+with col3:
+    if st.button("🏁 End Current Roll & Save", use_container_width=True):
+        final_len = st.session_state.total_distance_cm
+        st.success(f"🎉 Roll Inspection Finished! Final Length: **{final_len/100:.2f} m** ({final_len:.2f} cm)")
+        st.session_state.total_distance_cm = 0.0
+        st.session_state.is_measuring = False
 
-with col_sidebar_metrics:
-    st.subheader("📊 Live Calculation Dashboard")
-    
-    # Large metrics display boxes in device interface
-    metric_box_m = st.empty()
-    metric_box_cm = st.empty()
-    status_box = st.empty()
-    
-    st.divider()
-    
+with col4:
     if st.button("🔄 Reset Counter to 0", use_container_width=True):
-        if ctx.video_processor:
-            ctx.video_processor.total_distance_cm = 0.0
-            st.success("Counter reset successfully!")
-            
-    if st.button("🏁 End Roll & Save Length", use_container_width=True):
-        if ctx.video_processor:
-            final_m = ctx.video_processor.current_meters
-            final_cm = ctx.video_processor.total_distance_cm
-            st.success(f"🎉 Roll Saved! Final Length: **{final_m:.3f} m** ({final_cm:.2f} cm)")
-            ctx.video_processor.total_distance_cm = 0.0
+        st.session_state.total_distance_cm = 0.0
 
-# Real-time UI metrics sync loop when active
-if ctx.state.playing and ctx.video_processor:
-    metric_box_m.metric(label="Current Length (Meters)", value=f"{ctx.video_processor.current_meters:.3f} m")
-    metric_box_cm.metric(label="Current Length (Centimeters)", value=f"{ctx.video_processor.total_distance_cm:.2f} cm")
-    status_box.info(f"Machine Status: {ctx.video_processor.status_text}")
-else:
-    metric_box_m.metric(label="Current Length (Meters)", value="0.000 m")
-    metric_box_cm.metric(label="Current Length (Centimeters)", value="0.00 cm")
-    status_box.warning("Status: Click 'START' on the camera feed above to begin inspection.")
+st.divider()
+
+# Dashboard Displays
+kpi_col1, kpi_col2, kpi_col3 = st.columns(3)
+metric_m = kpi_col1.empty()
+metric_cm = kpi_col2.empty()
+status_indicator = kpi_col3.empty()
+
+video_placeholder = st.empty()
+
+# Initialize initial values on dashboard
+metric_m.metric(label="Total Measured Distance (Meters)", value=f"{st.session_state.total_distance_cm / 100:.3f} m")
+metric_cm.metric(label="Total Distance (Centimeters)", value=f"{st.session_state.total_distance_cm:.2f} cm")
+status_indicator.info("Status: Ready to Inspect")
+
+# --- CAMERA PROCESS LOOP ---
+if st.session_state.is_measuring:
+    cap = cv2.VideoCapture(camera_index)
+    
+    if not cap.isOpened():
+        st.error(f"❌ Camera at index {camera_index} could not be accessed. Please check USB connection.")
+        st.session_state.is_measuring = False
+    else:
+        ret, prev_frame = cap.read()
+        if ret:
+            prev_gray = cv2.cvtColor(prev_frame, cv2.COLOR_BGR2GRAY)
+            status_indicator.success("Status: 🟢 Live Measuring...")
+            
+            while st.session_state.is_measuring:
+                ret, current_frame = cap.read()
+                if not ret:
+                    st.warning("⚠️ Frame drop detected or camera disconnected.")
+                    break
+                
+                current_gray = cv2.cvtColor(current_frame, cv2.COLOR_BGR2GRAY)
+                
+                # Dense Optical Flow Calculation (Farneback Method)
+                flow = cv2.calcOpticalFlowFarneback(
+                    prev_gray, 
+                    current_gray, 
+                    None, 
+                    pyr_scale=0.5, 
+                    levels=3, 
+                    winsize=15, 
+                    iterations=3, 
+                    poly_n=5, 
+                    poly_sigma=1.2, 
+                    flags=0
+                )
+                
+                # Extract Vertical (Y-axis) and Horizontal (X-axis) motion vectors
+                # assuming fabric moves vertically down/up on the screen
+                flow_y = flow[..., 1] 
+                avg_dy_px = np.mean(flow_y)
+                
+                # Invert vector if camera is mounted upside-down
+                if direction_invert:
+                    avg_dy_px = -avg_dy_px
+                
+                # Apply noise filter threshold
+                if abs(avg_dy_px) > motion_threshold:
+                    delta_cm = avg_dy_px / px_per_cm
+                    st.session_state.total_distance_cm += delta_cm
+                
+                # Prevent negative distance below zero on fresh roll
+                if st.session_state.total_distance_cm < 0:
+                    st.session_state.total_distance_cm = 0.0
+
+                # Render Video Overlays
+                output_frame = current_frame.copy()
+                h, w, _ = output_frame.shape
+                
+                # Draw Motion Vectors/Overlay Text
+                cv2.rectangle(output_frame, (10, 10), (450, 90), (0, 0, 0), -1)
+                
+                current_m = st.session_state.total_distance_cm / 100.0
+                cv2.putText(output_frame, f"LIVE LENGTH: {current_m:.3f} m", (20, 45),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
+                
+                motion_dir_text = "FORWARD (+)" if avg_dy_px > motion_threshold else ("BACKWARD (-)" if avg_dy_px < -motion_threshold else "STOPPED (0)")
+                color = (0, 255, 255) if "FORWARD" in motion_dir_text else ((0, 0, 255) if "BACKWARD" in motion_dir_text else (255, 255, 255))
+                
+                cv2.putText(output_frame, f"DIR: {motion_dir_text}", (20, 75),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+                
+                # Directional Arrow Indicator
+                if abs(avg_dy_px) > motion_threshold:
+                    arrow_start = (w - 50, h // 2)
+                    arrow_end = (w - 50, (h // 2) + int(np.sign(avg_dy_px) * 50))
+                    cv2.arrowedLine(output_frame, arrow_start, arrow_end, color, 3)
+
+                # Streamlit UI Updates
+                metric_m.metric(label="Total Measured Distance (Meters)", value=f"{current_m:.3f} m")
+                metric_cm.metric(label="Total Distance (Centimeters)", value=f"{st.session_state.total_distance_cm:.2f} cm")
+                
+                frame_rgb = cv2.cvtColor(output_frame, cv2.COLOR_BGR2RGB)
+                video_placeholder.image(frame_rgb, channels="RGB", use_column_width=True)
+                
+                prev_gray = current_gray
+                
+            cap.release()

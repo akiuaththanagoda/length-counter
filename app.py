@@ -3,13 +3,11 @@ import numpy as np
 import streamlit as st
 import time
 
-# Page Configuration
 st.set_page_config(page_title="Ocean Lanka - Optical Flow Fabric Length Counter", layout="wide")
 
 st.title("🧵 Ocean Lanka - QC Live Continuous Fabric Length Counter (Optical Flow)")
 st.caption("USB Camera Inspection System for Tension-Free Real-time Fabric Measurement")
 
-# --- SIDEBAR CONFIGURATION ---
 st.sidebar.header("⚙️ System Calibration & Setup")
 camera_index = st.sidebar.number_input("USB Camera Index (e.g., 0, 1, 2)", min_value=0, max_value=5, value=0, step=1)
 
@@ -25,13 +23,11 @@ px_per_cm = st.sidebar.number_input(
 direction_invert = st.sidebar.checkbox("Invert Motion Direction (+/-)", value=False)
 motion_threshold = st.sidebar.slider("Noise Reduction Threshold", min_value=0.1, max_value=5.0, value=0.5, step=0.1)
 
-# --- SESSION STATE INITIALIZATION ---
 if "total_distance_cm" not in st.session_state:
     st.session_state.total_distance_cm = 0.0
 if "is_measuring" not in st.session_state:
     st.session_state.is_measuring = False
 
-# --- UI CONTROLS ---
 col1, col2, col3, col4 = st.columns(4)
 
 with col1:
@@ -55,7 +51,6 @@ with col4:
 
 st.divider()
 
-# Dashboard Displays
 kpi_col1, kpi_col2, kpi_col3 = st.columns(3)
 metric_m = kpi_col1.empty()
 metric_cm = kpi_col2.empty()
@@ -63,12 +58,10 @@ status_indicator = kpi_col3.empty()
 
 video_placeholder = st.empty()
 
-# Initialize initial values on dashboard
 metric_m.metric(label="Total Measured Distance (Meters)", value=f"{st.session_state.total_distance_cm / 100:.3f} m")
 metric_cm.metric(label="Total Distance (Centimeters)", value=f"{st.session_state.total_distance_cm:.2f} cm")
 status_indicator.info("Status: Ready to Inspect")
 
-# --- CAMERA PROCESS LOOP ---
 if st.session_state.is_measuring:
     cap = cv2.VideoCapture(camera_index)
     
@@ -89,7 +82,6 @@ if st.session_state.is_measuring:
                 
                 current_gray = cv2.cvtColor(current_frame, cv2.COLOR_BGR2GRAY)
                 
-                # Dense Optical Flow Calculation (Farneback Method)
                 flow = cv2.calcOpticalFlowFarneback(
                     prev_gray, 
                     current_gray, 
@@ -103,29 +95,22 @@ if st.session_state.is_measuring:
                     flags=0
                 )
                 
-                # Extract Vertical (Y-axis) and Horizontal (X-axis) motion vectors
-                # assuming fabric moves vertically down/up on the screen
                 flow_y = flow[..., 1] 
                 avg_dy_px = np.mean(flow_y)
                 
-                # Invert vector if camera is mounted upside-down
                 if direction_invert:
                     avg_dy_px = -avg_dy_px
                 
-                # Apply noise filter threshold
                 if abs(avg_dy_px) > motion_threshold:
                     delta_cm = avg_dy_px / px_per_cm
                     st.session_state.total_distance_cm += delta_cm
                 
-                # Prevent negative distance below zero on fresh roll
                 if st.session_state.total_distance_cm < 0:
                     st.session_state.total_distance_cm = 0.0
 
-                # Render Video Overlays
                 output_frame = current_frame.copy()
                 h, w, _ = output_frame.shape
                 
-                # Draw Motion Vectors/Overlay Text
                 cv2.rectangle(output_frame, (10, 10), (450, 90), (0, 0, 0), -1)
                 
                 current_m = st.session_state.total_distance_cm / 100.0
@@ -138,13 +123,11 @@ if st.session_state.is_measuring:
                 cv2.putText(output_frame, f"DIR: {motion_dir_text}", (20, 75),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
                 
-                # Directional Arrow Indicator
                 if abs(avg_dy_px) > motion_threshold:
                     arrow_start = (w - 50, h // 2)
                     arrow_end = (w - 50, (h // 2) + int(np.sign(avg_dy_px) * 50))
                     cv2.arrowedLine(output_frame, arrow_start, arrow_end, color, 3)
 
-                # Streamlit UI Updates
                 metric_m.metric(label="Total Measured Distance (Meters)", value=f"{current_m:.3f} m")
                 metric_cm.metric(label="Total Distance (Centimeters)", value=f"{st.session_state.total_distance_cm:.2f} cm")
                 
